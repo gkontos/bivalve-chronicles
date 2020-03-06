@@ -5,13 +5,16 @@ package bivalve
 // requirements
 // -- possibilty for multiple files (log and httpaccess) (or can log go to stderr and httpaccess go to stdout?)
 // -- single interface for logging or command line?
-// this requires being able to control the entire format
+// ---- this requires being able to control the entire format to include / not include headers
 // -- debug, info, and error log levels
 // -- config from args, env, or explicit
+// -- Display application file/line #'s
+// -- wrap the logging implementation to allow for future change
 
 // https://dave.cheney.net/2015/11/05/lets-talk-about-logging
 // excellent article about using less logging levels.
 
+// NOT USING GLOG b/c GLOG headers are static
 // https://hpc.nih.gov/development/glog.html
 // good overview & disambiguation of glog (especially severity vs. VLOG() )
 // TL;DR : Severity is the message importance.
@@ -27,12 +30,12 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/golang/glog"
 )
 
 var (
-	valvelog *log.Logger
+	valvelog       *log.Logger
+	level          int8
+	terminalOutput bool
 )
 
 // LogConfig is the struct for passing in logging configuration that we care about.
@@ -41,14 +44,25 @@ type LogConfig struct {
 	Output   string `toml:"output"`
 	Level    string `toml:"level"`
 	Filename string `toml:"filename"`
+	// DisplayMinimal will if true display a minimal log output.  If false, a default log line prefix with date, file, line number will be displayed
+	DisplayMinimal bool `toml:"displayMinimal"`
+	TerminalOutput bool `toml:"displayMinimal"`
 }
 
 const (
-	configOutputKey   = "BIVALVE_OUTPUT"
-	configLevelKey    = "BIVALVE_LEVEL"
-	configFilenameKey = "BIVALVE_FILENAME"
+	configOutputKey         = "BIVALVE_OUTPUT"
+	configLevelKey          = "BIVALVE_LEVEL"
+	configFilenameKey       = "BIVALVE_FILENAME"
+	configDisplayMinimalKey = "BIVALVE_DISPLAY_MINIMAL"
+
 	// ApacheFormatPattern is the default format used for apache access logs
 	ApacheFormatPattern = "%s - - [%s] \"%s %d %d\" %f\n"
+	debugLevel          = 4
+	infoLevel           = 2
+	errorLevel          = 1
+
+	ErrorColor = "\033[1;31m%s\033[0m"
+	DebugColor = "\033[0;36m%s\033[0m"
 )
 
 type webLoggingHandler struct {
@@ -61,60 +75,109 @@ func init() {
 	conf.Output = *flag.String(configOutputKey, getEnvConfigValueOr(configOutputKey, "stdout").(string), "where to output logs; 'stdout', 'file', or 'both'.")
 	conf.Level = *flag.String(configLevelKey, getEnvConfigValueOr(configLevelKey, "info").(string), "log level; 'debug', 'info', 'error'")
 	conf.Filename = *flag.String(configFilenameKey, getEnvConfigValueOr(configFilenameKey, "bivalve.log").(string), "log filename")
+	conf.DisplayMinimal = *flag.Bool(configDisplayMinimalKey, getEnvConfigValueOr(configDisplayMinimalKey, false).(bool), "log filename")
 
 	Configure(conf)
 }
 
 // Configure will set the logger instance configuration should an application want to explictly set the configuration
 func Configure(conf *LogConfig) {
+	writer := os.Stderr
 	switch conf.Output {
-	case "stdout":
-		flag.Set("logtostderr", "1")
 	case "file":
-		flag.Set("log_dir", conf.Filename)
-		glog.Warningf("Setting output file to %s", conf.Filename)
+		f, err := os.OpenFile(conf.Filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Println(err)
+		}
+		writer = f
+		defer f.Close()
+	case "stdout":
+		writer = os.Stdout
+
 	}
 
 	switch conf.Level {
 	case "debug":
-		flag.Set("stderrthreshold", "INFO")
-		flag.Set("v", "4")
+
+		level = debugLevel
 	case "error":
-		flag.Set("stderrthreshold", "ERROR")
-		flag.Set("v", "1")
+
+		level = errorLevel
 	default:
-		flag.Set("stderrthreshold", "INFO")
-		flag.Set("v", "2")
+
+		level = infoLevel
 	}
-	flag.Parse()
+
+	if conf.TerminalOutput {
+		terminalOutput = true
+	} else {
+		terminalOutput = false
+	}
+
+	logflags := log.Ldate | log.Ltime | log.Lmicroseconds | log.LUTC | log.Lshortfile
+	if conf.DisplayMinimal {
+		logflags = 0
+
+	}
+	valvelog = log.New(writer, "", logflags)
+	Debugf("Log Config set to : %+v", conf)
 }
 
-func Info(args ...interface{}) {
-	glog.V(2).Info(args...)
+// Info will log a string message
+func Info(s string) {
+	if level >= infoLevel {
+		valvelog.Output(2, s)
+	}
 }
 
+// Infof will log a formatted string message
 func Infof(s string, args ...interface{}) {
-	file, line := header()
-	fmt.Printf("%s:%d", file, line)
-	glog.V(2).Infof(s, args...)
+
+	if level >= infoLevel {
+		valvelog.Output(2, fmt.Sprintf(s, args...))
+	}
 }
 
-func Debug(args ...interface{}) {
-	glog.V(4).Info(args...)
+// Debug will log a string message
+func Debug(s string) {
+	if level >= debugLevel {
+		if terminalOutput {
+			s = fmt.Sprintf(DebugColor, s)
+		}
+		valvelog.Output(2, s)
+	}
 }
 
+// Debugf will log a formatted string message
 func Debugf(s string, args ...interface{}) {
-	glog.V(4).Infof(s, args...)
+	if level >= debugLevel {
+		msg := fmt.Sprintf(s, args...)
+		if terminalOutput {
+			msg = fmt.Sprintf(DebugColor, msg)
+		}
+		valvelog.Output(2, msg)
+	}
 }
 
-func Error(args ...interface{}) {
-	glog.Error(args...)
+// Error will log a string message
+func Error(s string) {
+	if terminalOutput {
+		s = fmt.Sprintf(ErrorColor, s)
+	}
+	valvelog.Output(2, s)
+
 }
 
+// Errorf will log a formatted string message
 func Errorf(s string, args ...interface{}) {
-	glog.Errorf(s, args...)
+	msg := fmt.Sprintf(s, args...)
+	if terminalOutput {
+		msg = fmt.Sprintf(ErrorColor, msg)
+	}
+	valvelog.Output(2, msg)
 }
 
+// RequestLogHandler http request log handler
 func RequestLogHandler(h http.Handler) http.Handler {
 
 	return webLoggingHandler{handler: h}
@@ -153,7 +216,7 @@ func (h webLoggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	timeFormatted := record.time.Format("02/Jan/2006 03:04:05")
 	requestLine := fmt.Sprintf("%s %s %s", record.method, record.uri, record.protocol)
-	glog.Info(ApacheFormatPattern, record.ip, timeFormatted, requestLine, record.status, record.responseBytes,
+	Infof(ApacheFormatPattern, record.ip, timeFormatted, requestLine, record.status, record.responseBytes,
 		record.elapsedTime.Seconds())
 
 }
@@ -169,7 +232,7 @@ func getEnvConfigValueOr(envKey string, defaultValue interface{}) interface{} {
 	return configValue
 }
 
-func header() (string, int) {
+func header() string {
 	_, file, line, ok := runtime.Caller(2)
 	if !ok {
 		file = "???"
@@ -180,5 +243,5 @@ func header() (string, int) {
 			file = file[slash+1:]
 		}
 	}
-	return file, line
+	return fmt.Sprintf("[%s:%d]", file, line)
 }
