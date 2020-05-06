@@ -69,6 +69,26 @@ type webLoggingHandler struct {
 	handler http.Handler
 }
 
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	length int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = 200
+	}
+	n, err := w.ResponseWriter.Write(b)
+	w.length += n
+	return n, err
+}
+
 func init() {
 	// pull configuration from config/log.config by default
 	conf := &LogConfig{}
@@ -187,15 +207,12 @@ func RequestLogHandler(h http.Handler) http.Handler {
 func (h webLoggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
+	sw := statusWriter{ResponseWriter: w}
 
-	h.handler.ServeHTTP(w, r)
+	h.handler.ServeHTTP(&sw, r)
 
 	endingTime := time.Now().UTC()
 
-	//		status := fn.status
-	//		if status == 0 {
-	//			status = 200
-	//		}
 	type ApacheLogRecord struct {
 		ip                    string
 		time                  time.Time
@@ -206,13 +223,14 @@ func (h webLoggingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	record := &ApacheLogRecord{
-		ip:          r.RemoteAddr,
-		time:        time.Time{},
-		method:      r.Method,
-		uri:         r.RequestURI,
-		protocol:    r.Proto,
-		status:      http.StatusOK,
-		elapsedTime: endingTime.Sub(start),
+		ip:            r.RemoteAddr,
+		time:          time.Time{},
+		method:        r.Method,
+		uri:           r.RequestURI,
+		protocol:      r.Proto,
+		status:        sw.status,
+		elapsedTime:   endingTime.Sub(start),
+		responseBytes: int64(sw.length),
 	}
 	timeFormatted := record.time.Format("02/Jan/2006 03:04:05")
 	requestLine := fmt.Sprintf("%s %s %s", record.method, record.uri, record.protocol)
